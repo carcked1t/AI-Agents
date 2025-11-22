@@ -32,8 +32,8 @@ A lightweight Streamlit web application that extracts YouTube transcripts and ge
 ### 1️. Clone the repository
 
 ```bash
-git clone https://github.com/<username>/<repo>.git
-cd <repo>
+https://github.com/carcked1t/AI-Agents.git
+cd AI-agents
 ```
 
 ### 2️. Install dependencies
