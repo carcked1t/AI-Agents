@@ -100,31 +100,27 @@ def get_transcript(video_id: str, languages: Optional[List[str]] = None) -> str:
         languages = ["en"]
 
     try:
-        # Different versions of youtube_transcript_api expose slightly different APIs.
-        # Try a few call patterns to maximize compatibility.
-        if hasattr(YouTubeTranscriptApi, "get_transcript"):
-            fetched = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-        else:
-            ytt = YouTubeTranscriptApi()
-            if hasattr(ytt, "get_transcript"):
-                fetched = ytt.get_transcript(video_id, languages=languages)
-            else:
-                # Older versions use fetch()
-                fetched = ytt.fetch(video_id, languages=languages)
+        # Get transcript list object
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-        def _snippet_text(snippet):
-            if isinstance(snippet, dict):
-                return snippet.get("text", "")
-            return getattr(snippet, "text", "")
+        # Attempt to find the requested language transcript
+        transcript_obj = transcript_list.find_transcript(languages)
 
-        transcript_text = " ".join(_snippet_text(snippet) for snippet in fetched)
-        return transcript_text or ""
+        # Fetch full transcript
+        fetched = transcript_obj.fetch()
+
+        # Join all text segments
+        transcript_text = " ".join(item.get("text", "") for item in fetched)
+
+        return transcript_text.strip()
+
+    except (CouldNotRetrieveTranscript, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, InvalidVideoId) as e:
+        logger.warning("Transcript not available for %s: %s", video_id, e)
+        return "Transcript not available."
+
     except Exception as e:
-        if isinstance(e, (CouldNotRetrieveTranscript, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, InvalidVideoId)):
-            logger.warning("Transcript not available for video %s: %s", video_id, e)
-            return "Transcript not available."
-        # re-raise unexpected exceptions
-        raise
+        logger.error("Unexpected error while fetching transcript: %s", e)
+        return "Transcript not available."
 
 
 async def main():
