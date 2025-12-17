@@ -2,7 +2,7 @@
 
 A lightweight Streamlit web application that extracts YouTube transcripts and generates AI-powered summaries using modern LLM APIs.
 
-🔗 **Live App:** *(https://ai-agents-youtube-transcript.streamlit.app/)*
+🔗 **Live App:** *[(https://ai-agents-youtube-transcript.streamlit.app/)](https://ai-agents-yt-transcript.streamlit.app/)*
 
 ##  What This Project Does
 
