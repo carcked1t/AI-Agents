@@ -1,136 +1,133 @@
-import asyncio
 import os
 import logging
 from typing import List, Optional
+from dataclasses import dataclass
+import re
+from urllib.parse import urlparse, parse_qs
+
 
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import (
-    CouldNotRetrieveTranscript,
-    NoTranscriptFound,
-    TranscriptsDisabled,
-    VideoUnavailable,
-    InvalidVideoId,
-)
-import openai
 from openai import OpenAI
 from dotenv import load_dotenv
-from dataclasses import dataclass
 
-
+# Setup
 load_dotenv()
-ai_api_key = os.getenv("AI_API_KEY")
+API_KEY = os.getenv("AI_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError("❌ AI_API_KEY not found in environment variables")
+
 client = OpenAI(
-    api_key=ai_api_key,
+    api_key=API_KEY,
     base_url="https://api.groq.com/openai/v1"
 )
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class Post:
-    platform: str
-    content: str
+MAX_TRANSCRIPT_CHARS = 12000  # prevents context overflow
 
 
-def _extract_response_text(response) -> str:
-    """Best-effort extractor for different OpenAI response shapes.
+# Utils
+def truncate_text(text: str, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
+    return text[:max_chars] + "..." if len(text) > max_chars else text
 
-    Tries common attributes (output_text, output) and falls back to str(response).
-    """
-    # Preferred attribute used by some SDK versions
+
+def extract_response_text(response) -> str:
     if hasattr(response, "output_text") and response.output_text:
         return response.output_text
-
-    # Some SDKs return an 'output' list/dict structure
-    output = getattr(response, "output", None)
-    if output:
-        try:
-            parts: List[str] = []
-            for item in output:
-                # item can be dict-like or object
-                if isinstance(item, dict):
-                    content = item.get("content") or item.get("text")
-                    if isinstance(content, list):
-                        for c in content:
-                            if isinstance(c, dict) and "text" in c:
-                                parts.append(c["text"])
-                            elif isinstance(c, str):
-                                parts.append(c)
-                    elif isinstance(content, str):
-                        parts.append(content)
-                else:
-                    parts.append(str(item))
-            if parts:
-                return " ".join(parts)
-        except Exception:
-            # fall through to final fallback
-            pass
-
-    # Final fallback
     return str(response)
 
 
-def generate_social_media_content(video_transcript: str, social_media_platform: str) -> str:
-    logger.info("Generating content for %s", social_media_platform)
-    prompt = (
-        f"Here is a new video transcript:\n{video_transcript}\n\n"
-        f"Generate engaging content suitable for {social_media_platform} based on this transcript."
-    )
+# Transcript
+def get_transcript(video_id: str) -> str:
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        # Try ALL English transcripts (manual + generated)
+        for transcript in transcript_list:
+            if transcript.language_code.startswith("en"):
+                try:
+                    fetched = transcript.fetch()
+                    text = " ".join(item["text"] for item in fetched)
+                    if text.strip():
+                        return truncate_text(text)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to fetch transcript "
+                        f"(lang={transcript.language_code}, "
+                        f"generated={transcript.is_generated}): {e}"
+                    )
+                    continue  # 🔥 THIS IS THE FIX
+
+        # No usable English transcript
+        logger.warning("No valid English transcript could be fetched.")
+        return ""
+
+    except Exception as e:
+        logger.error(f"Transcript list failed for {video_id}: {e}")
+        return ""
+
+# Content Generation
+def generate_social_media_content(
+    transcript: str,
+    platform: str,
+    user_query: str
+) -> str:
+    if not transcript.strip():
+        return "❌ Transcript is empty."
+
+    prompt = f"""
+You are a professional social media content writer.
+
+Platform: {platform}
+
+User request:
+{user_query}
+
+Video transcript:
+{transcript}
+
+Generate concise, engaging, platform-appropriate content.
+"""
 
     try:
         response = client.responses.create(
             model="llama-3.3-70b-versatile",
-            input=[{"role": "user", "content": prompt}],
-            max_output_tokens=2500,
+            input=prompt,
+            max_output_tokens=700,
         )
-        return _extract_response_text(response)
-    except openai.RateLimitError as e:
-        logger.error("OpenAI rate limit / quota error: %s", e)
-        return "[OpenAI request failed: rate limit or insufficient quota]"
-    except Exception as e:
-        logger.exception("Unexpected error calling OpenAI: %s", e)
-        return f"[OpenAI request failed: {e}]"
-
-
-def get_transcript(video_id: str, languages: Optional[List[str]] = None) -> str:
-    if languages is None:
-        languages = ["en"]
-
-    try:
-        # Get transcript list object
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-
-        # Attempt to find the requested language transcript
-        transcript_obj = transcript_list.find_transcript(languages)
-
-        # Fetch full transcript
-        fetched = transcript_obj.fetch()
-
-        # Join all text segments
-        transcript_text = " ".join(item.get("text", "") for item in fetched)
-
-        return transcript_text.strip()
-
-    except (CouldNotRetrieveTranscript, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, InvalidVideoId) as e:
-        logger.warning("Transcript not available for %s: %s", video_id, e)
-        return "Transcript not available."
+        return extract_response_text(response)
 
     except Exception as e:
-        logger.error("Unexpected error while fetching transcript: %s", e)
-        return "Transcript not available."
+        logger.exception("LLM generation failed")
+        return f"❌ Content generation failed: {str(e)}"
 
 
-async def main():
-    video_id = "Zxs7Rf2rWxc"
-    transcript = get_transcript(video_id, languages=["en"])  # sync call
-    msg = f"Create a linkedin post based on this video transcript: {transcript}"
-    post = generate_social_media_content(transcript, "LinkedIn")
-    logger.info("generated post:\n%s", post)
+def extract_video_id(youtube_input: str) -> str | None:
 
+    youtube_input = youtube_input.strip()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Case 1: Already a video ID
+    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", youtube_input):
+        return youtube_input
 
+    parsed = urlparse(youtube_input)
+
+    # youtu.be/VIDEO_ID
+    if parsed.netloc in {"youtu.be"}:
+        return parsed.path.lstrip("/")
+
+    # youtube.com/watch?v=VIDEO_ID
+    if parsed.netloc.endswith("youtube.com"):
+        query = parse_qs(parsed.query)
+
+        if "v" in query:
+            return query["v"][0]
+
+        # /embed/VIDEO_ID or /shorts/VIDEO_ID
+        path_parts = parsed.path.split("/")
+        if "embed" in path_parts or "shorts" in path_parts:
+            return path_parts[-1]
+
+    return None
